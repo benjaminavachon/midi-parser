@@ -41,31 +41,29 @@ int read_vlq(int fd, uint32_t* out) {
     return 0;
 }
 
-void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t division, char* midi_path){
-    uint32_t end_threshold = start_threshold + track_length;
+void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t division, const char* midi_path){
+    //uint32_t end_threshold = start_threshold + track_length;
+
+    int fd = open(midi_path, O_RDONLY);
+    if (fd < 0) {
+        perror("open midi");
+        return ;
+    }
+
+    //NEED TO GET THE START THRESHOLD SO I KNOW WHERE TO START LOOKING
+    //uint32_t start_threshold = 0;
+
+    read(fd,0,offset);
 
     fluid_settings_t* settings = new_fluid_settings();
     fluid_synth_t* synth = new_fluid_synth(settings);
     fluid_audio_driver_t* adriver = new_fluid_audio_driver(settings, synth);
 
-    int fd = open(midi_path, O_RDONLY);
-
-    while (lseek(fd, 0, SEEK_CUR) < end_threshold) {
-        printf("track searching :) \n");
-    }
-
-    uint32_t tempo = 500000;
-
-    struct midi_track_header_t track_head = {0};
-    if (read(fd, &track_head, sizeof(track_head)) != sizeof(track_head)) {
-        perror("read track header");
+    /* if (fluid_synth_sfload(synth, sf_path, 1) == FLUID_FAILED) {
+        //fprintf(stderr, "Failed to load SoundFont: %s\n", sf_path);
+        close(fd);
         return;
-    }
-
-    if (memcmp(track_head.chunk_type, "MTrk", 4) != 0) {
-        return;
-    }
-    off_t track_end = lseek(fd, 0, SEEK_CUR) + track_length;
+    } */
 
     uint8_t last_event_type = 0;
 
@@ -73,7 +71,7 @@ void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t divisio
         // Read delta time
         uint32_t delta_ticks = 0;
         if (read_vlq(fd, &delta_ticks) < 0) {
-            fprintf(stderr, "Failed reading delta time\n");
+            //fprintf(stderr, "Failed reading delta time\n");
             goto cleanup;
         }
 
@@ -86,7 +84,7 @@ void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t divisio
         // Read event type or running status
         uint8_t event_type = 0;
         if (read(fd, &event_type, 1) != 1) {
-            fprintf(stderr, "Failed reading event type\n");
+            //fprintf(stderr, "Failed reading event type\n");
             goto cleanup;
         }
 
@@ -94,45 +92,44 @@ void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t divisio
             // Meta event
             uint8_t meta_type = 0;
             if (read(fd, &meta_type, 1) != 1) {
-                fprintf(stderr, "Failed reading meta type\n");
+                //fprintf(stderr, "Failed reading meta type\n");
                 goto cleanup;
             }
 
             uint32_t meta_length = 0;
             if (read_vlq(fd, &meta_length) < 0) {
-                fprintf(stderr, "Failed reading meta length\n");
+                //fprintf(stderr, "Failed reading meta length\n");
                 goto cleanup;
             }
 
             uint8_t meta_data[256] = {0};
             if (meta_length > 255) meta_length = 255;
             if (read(fd, meta_data, meta_length) != meta_length) {
-                fprintf(stderr, "Failed reading meta data\n");
+                //fprintf(stderr, "Failed reading meta data\n");
                 goto cleanup;
             }
 
             if (meta_type == 0x2F) {
                 // End of track
-                printf("End of Track\n");
+                //printf("End of Track\n");
                 break;
             } else if (meta_type == 0x51 && meta_length == 3) {
                 // Set tempo
                 tempo = (meta_data[0] << 16) | (meta_data[1] << 8) | meta_data[2];
-                printf("Set Tempo: %u microseconds per quarter note (%.2f BPM)\n",
-                        tempo, 60000000.0 / tempo);
+                //printf("Set Tempo: %u microseconds per quarter note (%.2f BPM)\n", tempo, 60000000.0 / tempo);
             } else if (meta_type == 0x03) {
-                printf("Track Name: %.*s\n", meta_length, meta_data);
+                //printf("Track Name: %.*s\n", meta_length, meta_data);
             }
             // Ignore other meta events
         } else if (event_type == 0xF0 || event_type == 0xF7) {
             // SysEx event - skip
             uint32_t sysex_length = 0;
             if (read_vlq(fd, &sysex_length) < 0) {
-                fprintf(stderr, "Failed reading SysEx length\n");
+                //fprintf(stderr, "Failed reading SysEx length\n");
                 goto cleanup;
             }
             lseek(fd, sysex_length, SEEK_CUR);
-            printf("Skipped SysEx event (length %u)\n", sysex_length);
+            //printf("Skipped SysEx event (length %u)\n", sysex_length);
         } else {
             // Running status
             if ((event_type & 0x80) == 0) {
@@ -156,15 +153,15 @@ void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t divisio
             switch (status) {
                 case 0x80: // Note Off
                     fluid_synth_noteoff(synth, channel, param1);
-                    printf("Note Off: ch %d, note %d\n", channel, param1);
+                    //printf("Note Off: ch %d, note %d\n", channel, param1);
                     break;
                 case 0x90: // Note On
                     if (param2 > 0) {
                         fluid_synth_noteon(synth, channel, param1, param2);
-                        printf("Note On: ch %d, note %d, vel %d\n", channel, param1, param2);
+                        //printf("Note On: ch %d, note %d, vel %d\n", channel, param1, param2);
                     } else {
                         fluid_synth_noteoff(synth, channel, param1);
-                        printf("Note Off (via Note On vel=0): ch %d, note %d\n", channel, param1);
+                        //printf("Note Off (via Note On vel=0): ch %d, note %d\n", channel, param1);
                     }
                     break;
                 case 0xA0: // Polyphonic Aftertouch
@@ -175,7 +172,7 @@ void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t divisio
                     break;
                 case 0xC0: // Program Change
                     fluid_synth_program_change(synth, channel, param1);
-                    printf("Program Change: ch %d, program %d\n", channel, param1);
+                    //printf("Program Change: ch %d, program %d\n", channel, param1);
                     break;
                 case 0xD0: // Channel Pressure
                     // ignore or implement
@@ -183,19 +180,21 @@ void readTrack(uint32_t start_threshold, uint32_t track_length, uint32_t divisio
                 case 0xE0: { // Pitch Bend
                     int pitch = ((param2 << 7) | param1) - 8192;
                     // You can implement pitch bend if desired
-                    printf("Pitch Bend: ch %d, value %d\n", channel, pitch);
+                    //printf("Pitch Bend: ch %d, value %d\n", channel, pitch);
                     break;
                 }
                 default:
-                    printf("Unknown MIDI event: 0x%X\n", status);
+                    //printf("Unknown MIDI event: 0x%X\n", status);
                     break;
             }
         }
     }
+
     cleanup:
     delete_fluid_audio_driver(adriver);
     delete_fluid_synth(synth);
     delete_fluid_settings(settings);
+    
 }
 
 int main(int argc, char *argv[]) {
@@ -237,28 +236,42 @@ int main(int argc, char *argv[]) {
     printf(" Tracks: %d\n", num_tracks);
     printf(" Division: %d ticks per quarter note\n", division);
 
-    fluid_settings_t* settings = new_fluid_settings();
-    fluid_synth_t* synth = new_fluid_synth(settings);
-    fluid_audio_driver_t* adriver = new_fluid_audio_driver(settings, synth);
-
-    if (fluid_synth_sfload(synth, sf_path, 1) == FLUID_FAILED) {
-        fprintf(stderr, "Failed to load SoundFont: %s\n", sf_path);
-        close(fd);
-        return 1;
-    }
+    // Initialize FluidSynth
+    
 
     // Tempo in microseconds per quarter note
     uint32_t tempo = 500000; // default 120 BPM
 
+    uint32_t offset = sizeof(head);
+
     // Process each track
     for (int track_idx = 0; track_idx < num_tracks; ++track_idx) {
-       
+        struct midi_track_header_t track_head = {0};
+        if (read(fd, &track_head, sizeof(track_head)) != sizeof(track_head)) {
+            perror("read track header");
+            break;
+        }
+
+        offset += sizeof(track_head);
+
+        if (memcmp(track_head.chunk_type, "MTrk", 4) != 0) {
+            fprintf(stderr, "Track %d does not start with MTrk\n", track_idx);
+            break;
+        }
+
+        uint32_t track_length = swap32(track_head.length);
+        off_t track_end = lseek(fd, 0, SEEK_CUR) + track_length;
+
+        printf("\n=== Track %d: length %u bytes ===\n", track_idx + 1, track_length);
+
+        //THIS IS WHERE I DO THE THING
+        readTrack(offset,track_end,tempo,division,midi_path);
+
+        offset += track_head.length;
+        printf("%d bytes from the start\n",offset);
     }
 
-    cleanup:
-    delete_fluid_audio_driver(adriver);
-    delete_fluid_synth(synth);
-    delete_fluid_settings(settings);
+
 
     close(fd);
     return 0;
