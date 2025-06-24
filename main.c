@@ -149,15 +149,15 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
             switch (status) {
                 case 0x80: // Note Off
                     fluid_synth_noteoff(synth, channel, param1);
-                    //printf("Note Off: ch %d, note %d\n", channel, param1);
+                    printf("Note Off: ch %d, note %d\n", channel, param1);
                     break;
                 case 0x90: // Note On
                     if (param2 > 0) {
                         fluid_synth_noteon(synth, channel, param1, param2);
-                        //printf("Note On: ch %d, note %d, vel %d\n", channel, param1, param2);
+                        printf("Note On: ch %d, note %d, vel %d\n", channel, param1, param2);
                     } else {
                         fluid_synth_noteoff(synth, channel, param1);
-                        //printf("Note Off (via Note On vel=0): ch %d, note %d\n", channel, param1);
+                        printf("Note Off (via Note On vel=0): ch %d, note %d\n", channel, param1);
                     }
                     break;
                 case 0xA0: // Polyphonic Aftertouch
