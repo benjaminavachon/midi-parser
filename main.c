@@ -53,7 +53,7 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
     //NEED TO GET THE START THRESHOLD SO I KNOW WHERE TO START LOOKING
     //uint32_t start_threshold = 0;
 
-    read(fd,0,offset);
+    lseek(fd, offset, SEEK_SET);
 
     fluid_settings_t* settings = new_fluid_settings();
     fluid_synth_t* synth = new_fluid_synth(settings);
@@ -246,6 +246,9 @@ int main(int argc, char *argv[]) {
 
     // Process each track
     for (int track_idx = 0; track_idx < num_tracks; ++track_idx) {
+        //lseek(fd, 0, SEEK_CUR);
+        //lseek(fd,offset,SEEK_SET);
+        lseek(fd, offset, SEEK_SET);
         struct midi_track_header_t track_head = {0};
         if (read(fd, &track_head, sizeof(track_head)) != sizeof(track_head)) {
             perror("read track header");
@@ -267,7 +270,8 @@ int main(int argc, char *argv[]) {
         //THIS IS WHERE I DO THE THING
         readTrack(offset,track_end,tempo,division,midi_path);
 
-        offset += track_head.length;
+        offset = track_end; 
+        //lseek(fd,offset,SEEK_SET);
         printf("%d bytes from the start\n",offset);
     }
 
