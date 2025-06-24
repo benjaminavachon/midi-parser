@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
 #include <stdlib.h>
-#include <time.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <fluidsynth.h>
 
 struct __attribute__((packed)) midi_header_t {
@@ -20,231 +20,154 @@ struct __attribute__((packed)) midi_track_header_t {
     uint32_t length;
 };
 
-// Helper: swap big endian 32-bit
+typedef struct {
+    uint8_t* data;
+    uint32_t length;
+    int index;
+} midi_track_t;
+
 uint32_t swap32(uint32_t val) {
     return ((val >> 24) & 0xff) | ((val >> 8) & 0xff00) |
            ((val << 8) & 0xff0000) | ((val << 24) & 0xff000000);
 }
 
-// Helper: swap big endian 16-bit
 uint16_t swap16(uint16_t val) {
     return (val >> 8) | (val << 8);
 }
 
-// Read a variable length quantity (VLQ)
-int read_vlq(int fd, uint32_t* out) {
-    *out = 0;
-    uint8_t b = 0;
-    do {
-        if (read(fd, &b, 1) != 1) return -1;
-        *out = (*out << 7) | (b & 0x7F);
-    } while (b & 0x80);
-    return 0;
+void play_track(midi_track_t track, fluid_synth_t* synth, uint16_t division) {
+    uint32_t tempo = 500000;
+    uint32_t pos = 0;
+    uint8_t last_event = 0;
+
+    while (pos < track.length) {
+        uint32_t delta = 0;
+        uint8_t b;
+        do {
+            b = track.data[pos++];
+            delta = (delta << 7) | (b & 0x7F);
+        } while (b & 0x80 && pos < track.length);
+
+        usleep((delta * tempo) / division);
+
+        uint8_t status = track.data[pos++];
+        if (status == 0xFF) {
+            uint8_t type = track.data[pos++];
+            uint32_t len = 0;
+            do {
+                b = track.data[pos++];
+                len = (len << 7) | (b & 0x7F);
+            } while (b & 0x80);
+
+            if (type == 0x51 && len == 3) {
+                tempo = (track.data[pos] << 16) | (track.data[pos + 1] << 8) | track.data[pos + 2];
+            }
+            pos += len;
+        } else {
+            if ((status & 0x80) == 0) {
+                pos--;
+                status = last_event;
+            } else {
+                last_event = status;
+            }
+
+            uint8_t type = status & 0xF0;
+            uint8_t chan = status & 0x0F;
+            uint8_t p1 = track.data[pos++];
+            uint8_t p2 = (type != 0xC0 && type != 0xD0) ? track.data[pos++] : 0;
+
+            switch (type) {
+                case 0x90:
+                    if (p2 > 0)
+                        fluid_synth_noteon(synth, chan, p1, p2);
+                    else
+                        fluid_synth_noteoff(synth, chan, p1);
+                    break;
+                case 0x80:
+                    fluid_synth_noteoff(synth, chan, p1);
+                    break;
+                case 0xC0:
+                    fluid_synth_program_change(synth, chan, p1);
+                    break;
+            }
+        }
+    }
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <midi_file.mid> <soundfont.sf2>\n", argv[0]);
         return 1;
     }
 
-    const char* midi_path = argv[1];
-    const char* sf_path = argv[2];
-
-    int fd = open(midi_path, O_RDONLY);
+    int fd = open(argv[1], O_RDONLY);
     if (fd < 0) {
-        perror("open midi");
+        perror("open");
         return 1;
     }
 
-    struct midi_header_t head = {0};
-    if (read(fd, &head, sizeof(head)) != sizeof(head)) {
-        perror("read header");
-        close(fd);
+    struct midi_header_t head;
+    read(fd, &head, sizeof(head));
+    if (memcmp(head.chunk_type, "MThd", 4) != 0) {
+        fprintf(stderr, "Invalid MIDI header\n");
         return 1;
     }
 
-    // Swap endian for multi-byte fields
-    uint32_t header_length = swap32(head.header_length);
     uint16_t format = swap16(head.format);
     uint16_t num_tracks = swap16(head.num_tracks);
     uint16_t division = swap16(head.division);
 
-    if (memcmp(head.chunk_type, "MThd", 4) != 0) {
-        fprintf(stderr, "Not a valid MIDI file (missing MThd)\n");
-        close(fd);
-        return 1;
+    midi_track_t* tracks = calloc(num_tracks, sizeof(midi_track_t));
+
+    for (int i = 0; i < num_tracks; ++i) {
+        struct midi_track_header_t track_head;
+        read(fd, &track_head, sizeof(track_head));
+
+        if (memcmp(track_head.chunk_type, "MTrk", 4) != 0) {
+            fprintf(stderr, "Invalid track header at track %d\n", i);
+            return 1;
+        }
+
+        uint32_t length = swap32(track_head.length);
+        uint8_t* data = malloc(length);
+        read(fd, data, length);
+
+        tracks[i].data = data;
+        tracks[i].length = length;
+        tracks[i].index = i;
     }
 
-    printf("MIDI header:\n");
-    printf(" Format: %d\n", format);
-    printf(" Tracks: %d\n", num_tracks);
-    printf(" Division: %d ticks per quarter note\n", division);
+    close(fd);
 
-    // Initialize FluidSynth
     fluid_settings_t* settings = new_fluid_settings();
     fluid_synth_t* synth = new_fluid_synth(settings);
     fluid_audio_driver_t* adriver = new_fluid_audio_driver(settings, synth);
 
-    if (fluid_synth_sfload(synth, sf_path, 1) == FLUID_FAILED) {
-        fprintf(stderr, "Failed to load SoundFont: %s\n", sf_path);
-        close(fd);
+    if (fluid_synth_sfload(synth, argv[2], 1) == FLUID_FAILED) {
+        fprintf(stderr, "Failed to load soundfont\n");
         return 1;
     }
 
-    // Tempo in microseconds per quarter note
-    uint32_t tempo = 500000; // default 120 BPM
-
-    // Process each track
-    for (int track_idx = 0; track_idx < num_tracks; ++track_idx) {
-        struct midi_track_header_t track_head = {0};
-        if (read(fd, &track_head, sizeof(track_head)) != sizeof(track_head)) {
-            perror("read track header");
-            break;
-        }
-
-        if (memcmp(track_head.chunk_type, "MTrk", 4) != 0) {
-            fprintf(stderr, "Track %d does not start with MTrk\n", track_idx);
-            break;
-        }
-
-        uint32_t track_length = swap32(track_head.length);
-        off_t track_end = lseek(fd, 0, SEEK_CUR) + track_length;
-
-        printf("\n=== Track %d: length %u bytes ===\n", track_idx + 1, track_length);
-
-        uint8_t last_event_type = 0;
-
-        while (lseek(fd, 0, SEEK_CUR) < track_end) {
-            // Read delta time
-            uint32_t delta_ticks = 0;
-            if (read_vlq(fd, &delta_ticks) < 0) {
-                fprintf(stderr, "Failed reading delta time\n");
-                goto cleanup;
-            }
-
-            // Sleep for delta time converted to microseconds
-            uint32_t delay_us = (uint64_t)delta_ticks * tempo / division;
-            if (delay_us > 0) {
-                usleep(delay_us);
-            }
-
-            // Read event type or running status
-            uint8_t event_type = 0;
-            if (read(fd, &event_type, 1) != 1) {
-                fprintf(stderr, "Failed reading event type\n");
-                goto cleanup;
-            }
-
-            if (event_type == 0xFF) {
-                // Meta event
-                uint8_t meta_type = 0;
-                if (read(fd, &meta_type, 1) != 1) {
-                    fprintf(stderr, "Failed reading meta type\n");
-                    goto cleanup;
-                }
-
-                uint32_t meta_length = 0;
-                if (read_vlq(fd, &meta_length) < 0) {
-                    fprintf(stderr, "Failed reading meta length\n");
-                    goto cleanup;
-                }
-
-                uint8_t meta_data[256] = {0};
-                if (meta_length > 255) meta_length = 255;
-                if (read(fd, meta_data, meta_length) != meta_length) {
-                    fprintf(stderr, "Failed reading meta data\n");
-                    goto cleanup;
-                }
-
-                if (meta_type == 0x2F) {
-                    // End of track
-                    printf("End of Track\n");
-                    break;
-                } else if (meta_type == 0x51 && meta_length == 3) {
-                    // Set tempo
-                    tempo = (meta_data[0] << 16) | (meta_data[1] << 8) | meta_data[2];
-                    printf("Set Tempo: %u microseconds per quarter note (%.2f BPM)\n",
-                           tempo, 60000000.0 / tempo);
-                } else if (meta_type == 0x03) {
-                    printf("Track Name: %.*s\n", meta_length, meta_data);
-                }
-                // Ignore other meta events
-            } else if (event_type == 0xF0 || event_type == 0xF7) {
-                // SysEx event - skip
-                uint32_t sysex_length = 0;
-                if (read_vlq(fd, &sysex_length) < 0) {
-                    fprintf(stderr, "Failed reading SysEx length\n");
-                    goto cleanup;
-                }
-                lseek(fd, sysex_length, SEEK_CUR);
-                printf("Skipped SysEx event (length %u)\n", sysex_length);
-            } else {
-                // Running status
-                if ((event_type & 0x80) == 0) {
-                    lseek(fd, -1, SEEK_CUR);
-                    event_type = last_event_type;
-                } else {
-                    last_event_type = event_type;
-                }
-
-                uint8_t status = event_type & 0xF0;
-                uint8_t channel = event_type & 0x0F;
-
-                uint8_t param1 = 0, param2 = 0;
-                if (status == 0xC0 || status == 0xD0) {
-                    if (read(fd, &param1, 1) != 1) goto cleanup;
-                } else {
-                    if (read(fd, &param1, 1) != 1) goto cleanup;
-                    if (read(fd, &param2, 1) != 1) goto cleanup;
-                }
-
-                switch (status) {
-                    case 0x80: // Note Off
-                        fluid_synth_noteoff(synth, channel, param1);
-                        printf("Note Off: ch %d, note %d\n", channel, param1);
-                        break;
-                    case 0x90: // Note On
-                        if (param2 > 0) {
-                            fluid_synth_noteon(synth, channel, param1, param2);
-                            printf("Note On: ch %d, note %d, vel %d\n", channel, param1, param2);
-                        } else {
-                            fluid_synth_noteoff(synth, channel, param1);
-                            printf("Note Off (via Note On vel=0): ch %d, note %d\n", channel, param1);
-                        }
-                        break;
-                    case 0xA0: // Polyphonic Aftertouch
-                        // ignore or implement
-                        break;
-                    case 0xB0: // Control Change
-                        // ignore or implement
-                        break;
-                    case 0xC0: // Program Change
-                        fluid_synth_program_change(synth, channel, param1);
-                        printf("Program Change: ch %d, program %d\n", channel, param1);
-                        break;
-                    case 0xD0: // Channel Pressure
-                        // ignore or implement
-                        break;
-                    case 0xE0: { // Pitch Bend
-                        int pitch = ((param2 << 7) | param1) - 8192;
-                        // You can implement pitch bend if desired
-                        printf("Pitch Bend: ch %d, value %d\n", channel, pitch);
-                        break;
-                    }
-                    default:
-                        printf("Unknown MIDI event: 0x%X\n", status);
-                        break;
-                }
-            }
+    for (int i = 0; i < num_tracks; ++i) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            play_track(tracks[i], synth, division);
+            exit(0);
         }
     }
 
-cleanup:
+    for (int i = 0; i < num_tracks; ++i) {
+        wait(NULL);
+    }
+
     delete_fluid_audio_driver(adriver);
     delete_fluid_synth(synth);
     delete_fluid_settings(settings);
 
-    close(fd);
+    for (int i = 0; i < num_tracks; ++i) {
+        free(tracks[i].data);
+    }
+    free(tracks);
+
     return 0;
 }
