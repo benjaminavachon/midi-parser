@@ -41,7 +41,7 @@ int read_vlq(int fd, uint32_t* out) {
     return 0;
 }
 
-void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t division, const char* midi_path){
+void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t division, const char* midi_path, fluid_synth_t* synth){
     //uint32_t end_threshold = start_threshold + track_length;
 
     int fd = open(midi_path, O_RDONLY);
@@ -54,10 +54,6 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
     //uint32_t start_threshold = 0;
 
     lseek(fd, offset, SEEK_SET);
-
-    fluid_settings_t* settings = new_fluid_settings();
-    fluid_synth_t* synth = new_fluid_synth(settings);
-    fluid_audio_driver_t* adriver = new_fluid_audio_driver(settings, synth);
 
     /* if (fluid_synth_sfload(synth, sf_path, 1) == FLUID_FAILED) {
         //fprintf(stderr, "Failed to load SoundFont: %s\n", sf_path);
@@ -72,7 +68,7 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
         uint32_t delta_ticks = 0;
         if (read_vlq(fd, &delta_ticks) < 0) {
             //fprintf(stderr, "Failed reading delta time\n");
-            goto cleanup;
+            return;
         }
 
         // Sleep for delta time converted to microseconds
@@ -85,7 +81,7 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
         uint8_t event_type = 0;
         if (read(fd, &event_type, 1) != 1) {
             //fprintf(stderr, "Failed reading event type\n");
-            goto cleanup;
+            return;
         }
 
         if (event_type == 0xFF) {
@@ -93,20 +89,20 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
             uint8_t meta_type = 0;
             if (read(fd, &meta_type, 1) != 1) {
                 //fprintf(stderr, "Failed reading meta type\n");
-                goto cleanup;
+                return;
             }
 
             uint32_t meta_length = 0;
             if (read_vlq(fd, &meta_length) < 0) {
                 //fprintf(stderr, "Failed reading meta length\n");
-                goto cleanup;
+                return;
             }
 
             uint8_t meta_data[256] = {0};
             if (meta_length > 255) meta_length = 255;
             if (read(fd, meta_data, meta_length) != meta_length) {
                 //fprintf(stderr, "Failed reading meta data\n");
-                goto cleanup;
+                return;
             }
 
             if (meta_type == 0x2F) {
@@ -126,7 +122,7 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
             uint32_t sysex_length = 0;
             if (read_vlq(fd, &sysex_length) < 0) {
                 //fprintf(stderr, "Failed reading SysEx length\n");
-                goto cleanup;
+                return;
             }
             lseek(fd, sysex_length, SEEK_CUR);
             //printf("Skipped SysEx event (length %u)\n", sysex_length);
@@ -144,10 +140,10 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
 
             uint8_t param1 = 0, param2 = 0;
             if (status == 0xC0 || status == 0xD0) {
-                if (read(fd, &param1, 1) != 1) goto cleanup;
+                if (read(fd, &param1, 1) != 1) return;
             } else {
-                if (read(fd, &param1, 1) != 1) goto cleanup;
-                if (read(fd, &param2, 1) != 1) goto cleanup;
+                if (read(fd, &param1, 1) != 1) return;
+                if (read(fd, &param2, 1) != 1) return;
             }
 
             switch (status) {
@@ -190,10 +186,7 @@ void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t divis
         }
     }
 
-    cleanup:
-    delete_fluid_audio_driver(adriver);
-    delete_fluid_synth(synth);
-    delete_fluid_settings(settings);
+    
     
 }
 
@@ -237,7 +230,9 @@ int main(int argc, char *argv[]) {
     printf(" Division: %d ticks per quarter note\n", division);
 
     // Initialize FluidSynth
-    
+    fluid_settings_t* settings = new_fluid_settings();
+    fluid_synth_t* synth = new_fluid_synth(settings);
+    fluid_audio_driver_t* adriver = new_fluid_audio_driver(settings, synth);
 
     // Tempo in microseconds per quarter note
     uint32_t tempo = 500000; // default 120 BPM
@@ -268,15 +263,19 @@ int main(int argc, char *argv[]) {
         printf("\n=== Track %d: length %u bytes ===\n", track_idx + 1, track_length);
 
         //THIS IS WHERE I DO THE THING
-        readTrack(offset,track_end,tempo,division,midi_path);
+        readTrack(offset,track_end,tempo,division,midi_path,synth);
 
         offset = track_end; 
         //lseek(fd,offset,SEEK_SET);
         printf("%d bytes from the start\n",offset);
     }
 
-
+cleanup:
+    delete_fluid_audio_driver(adriver);
+    delete_fluid_synth(synth);
+    delete_fluid_settings(settings);
 
     close(fd);
     return 0;
 }
+
