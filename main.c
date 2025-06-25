@@ -41,19 +41,12 @@ int read_vlq(int fd, uint32_t* out) {
     return 0;
 }
 
-void readTrack(uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t division, const char* midi_path, fluid_synth_t* synth){
+void readTrack(int fd, uint32_t offset, uint32_t track_end,uint32_t tempo,uint16_t division, const char* midi_path, fluid_synth_t* synth){
     //uint32_t end_threshold = start_threshold + track_length;
-
-    int fd = open(midi_path, O_RDONLY);
-    if (fd < 0) {
-        perror("open midi");
-        return ;
-    }
+    lseek(fd, offset, SEEK_SET);
 
     //NEED TO GET THE START THRESHOLD SO I KNOW WHERE TO START LOOKING
     //uint32_t start_threshold = 0;
-
-    lseek(fd, offset, SEEK_SET);
 
     /* if (fluid_synth_sfload(synth, sf_path, 1) == FLUID_FAILED) {
         //fprintf(stderr, "Failed to load SoundFont: %s\n", sf_path);
@@ -234,6 +227,15 @@ int main(int argc, char *argv[]) {
     fluid_synth_t* synth = new_fluid_synth(settings);
     fluid_audio_driver_t* adriver = new_fluid_audio_driver(settings, synth);
 
+    if (fluid_synth_sfload(synth, sf_path, 1) == FLUID_FAILED) {
+        fprintf(stderr, "Failed to load SoundFont: %s\n", sf_path);
+        return 1;
+    }
+
+    for (int ch = 0; ch < 16; ++ch) {
+        fluid_synth_program_change(synth, ch, 0); // Acoustic Grand Piano
+    }
+
     // Tempo in microseconds per quarter note
     uint32_t tempo = 500000; // default 120 BPM
 
@@ -250,8 +252,6 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        offset += sizeof(track_head);
-
         if (memcmp(track_head.chunk_type, "MTrk", 4) != 0) {
             fprintf(stderr, "Track %d does not start with MTrk\n", track_idx);
             break;
@@ -263,7 +263,7 @@ int main(int argc, char *argv[]) {
         printf("\n=== Track %d: length %u bytes ===\n", track_idx + 1, track_length);
 
         //THIS IS WHERE I DO THE THING
-        readTrack(offset,track_end,tempo,division,midi_path,synth);
+        readTrack(fd,offset,track_end,tempo,division,midi_path,synth);
 
         offset = track_end; 
         //lseek(fd,offset,SEEK_SET);
